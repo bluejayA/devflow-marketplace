@@ -1,0 +1,33 @@
+{
+  "name": "devflow-marketplace",
+  "owner": {
+    "name": "Jay Ahn",
+    "email": "jay@devflow"
+  },
+  "metadata": {
+    "description": "devflow — AI-DLC 기반 개발 워크플로우 플러그인",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "devflow",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/bluejayA/devflow.git"
+      },
+      "description": "AI-DLC 방법론 기반 Claude Code 개발 워크플로우 플러그인 (22개 skill)",
+      "version": "0.2.0",
+      "strict": true
+    },
+    {
+      "name": "aidlc",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/bluejayA/devflow-aidlc-like.git"
+      },
+      "description": "AI-DLC 방법론 기반 개발 워크플로우 플러그인 (B안: Orchestrator-Centric, 17개 skill)",
+      "version": "0.3.0",
+      "strict": true
+    }
+  ]
+}

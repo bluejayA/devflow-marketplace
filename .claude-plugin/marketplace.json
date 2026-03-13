@@ -26,7 +26,7 @@
         "url": "https://github.com/bluejayA/devflow-aidlc-like.git"
       },
       "description": "AI-DLC 방법론 기반 개발 워크플로우 플러그인 (B안: Orchestrator-Centric, 17개 skill)",
-      "version": "0.3.0",
+      "version": "0.6.0",
       "strict": true
     }
   ]

@@ -16,7 +16,7 @@
         "url": "https://github.com/bluejayA/devflow.git"
       },
       "description": "AI-DLC 방법론 기반 Claude Code 개발 워크플로우 플러그인 (22개 skill)",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "strict": true
     },
     {

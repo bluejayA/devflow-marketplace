@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "devflow — AI-DLC 기반 개발 워크플로우 플러그인",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "plugins": [
     {
@@ -15,7 +15,7 @@
         "source": "url",
         "url": "https://github.com/bluejayA/devflow.git"
       },
-      "description": "AI-DLC 방법론 기반 Claude Code 개발 워크플로우 플러그인 (22개 skill)",
+      "description": "AI-DLC 방법론 기반 Claude Code 개발 워크플로우 플러그인 (Enhanced Skills, 23개 skill)",
       "version": "0.3.0",
       "strict": true
     },
@@ -25,8 +25,8 @@
         "source": "url",
         "url": "https://github.com/bluejayA/devflow-aidlc-like.git"
       },
-      "description": "AI-DLC 방법론 기반 개발 워크플로우 플러그인 (B안: Orchestrator-Centric, 17개 skill)",
-      "version": "0.9.0",
+      "description": "AI-DLC 방법론 기반 개발 워크플로우 플러그인 (Orchestrator-Centric, 27개 skill, 10개 공유 패턴, 8개 리뷰어)",
+      "version": "1.0.0",
       "strict": true
     }
   ]

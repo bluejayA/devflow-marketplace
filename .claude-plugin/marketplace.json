@@ -18,6 +18,16 @@
       "description": "AI-DLC 방법론 기반 개발 워크플로우 플러그인 (Orchestrator-Centric, 27개 skill, 10개 공유 패턴, 10개 리뷰어, 4-stage 코드 리뷰)",
       "version": "1.2.0",
       "strict": true
+    },
+    {
+      "name": "reverse-engineering",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/bluejayA/devflow-reverse-engineering.git"
+      },
+      "description": "Brownfield 코드베이스 구조/흐름/패턴 분석 플러그인 (4-Phase Pipeline, Lite/Deep/Delta 3모드, Sub-agent 병렬 분석)",
+      "version": "0.4.0",
+      "strict": false
     }
   ]
 }

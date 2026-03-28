@@ -5,8 +5,8 @@
     "email": "jay.ahn@kt.com"
   },
   "metadata": {
-    "description": "devflow — AI-DLC 기반 개발 워크플로우 플러그인",
-    "version": "0.2.0"
+    "description": "devflow toolchain",
+    "version": "0.3.0"
   },
   "plugins": [
     {

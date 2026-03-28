@@ -28,6 +28,16 @@
       "description": "Brownfield 코드베이스 구조/흐름/패턴 분석 플러그인 (4-Phase Pipeline, Lite/Deep/Delta 3모드, Sub-agent 병렬 분석)",
       "version": "0.4.0",
       "strict": false
+    },
+    {
+      "name": "skill-security-audit",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/bluejayA/skill-security-audit.git"
+      },
+      "description": "Claude Code 스킬 보안 감사 플러그인 — 자격증명 보호, 시스템 안전, 최소 품질 기준 검사 (22개 규칙, Phase 1, Adoption-First 원칙)",
+      "version": "1.5.0",
+      "strict": false
     }
   ]
 }

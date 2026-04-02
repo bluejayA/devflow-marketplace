@@ -108,10 +108,7 @@ jobs:
             # Fail-Closed: claude CLI 실패 시 BLOCKED 처리 (API 키 누락, 네트워크 오류 등)
             if [ $CLAUDE_EXIT -ne 0 ] || [ -z "$RESULT" ]; then
               echo "::error::Claude CLI failed for $SKILL_DIR (exit code: $CLAUDE_EXIT)"
-              REPORT="${REPORT}
-## ❌ ${SKILL_DIR}
-Audit execution failed (exit code: ${CLAUDE_EXIT}). Treating as BLOCKED for safety.
-"
+              REPORT="${REPORT}$(printf '\n## ❌ %s\nAudit execution failed (exit code: %s). Treating as BLOCKED for safety.\n' "$SKILL_DIR" "$CLAUDE_EXIT")"
               OVERALL_VERDICT="BLOCKED"
               echo "::endgroup::"
               continue
@@ -132,9 +129,7 @@ Audit execution failed (exit code: ${CLAUDE_EXIT}). Treating as BLOCKED for safe
               SKILL_VERDICT="PASSED"
             fi
 
-            REPORT="${REPORT}
-${RESULT}
-"
+            REPORT="${REPORT}$(printf '\n%s\n' "$RESULT")"
             echo "::endgroup::"
           done
 

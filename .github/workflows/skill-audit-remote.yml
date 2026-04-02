@@ -159,10 +159,7 @@ jobs:
             timeout 120 git clone --depth 1 --no-tags --recurse-submodules=no \
               "$URL" "_plugins/$PLUGIN_NAME" 2>&1 || {
               echo "::error::Failed to clone $URL"
-              REPORT="${REPORT}
-## ❌ ${PLUGIN_NAME}
-Clone failed: $URL
-"
+              REPORT="${REPORT}$(printf '\n## ❌ %s\nClone failed: %s\n' "$PLUGIN_NAME" "$URL")"
               OVERALL_VERDICT="BLOCKED"
               echo "::endgroup::"
               continue
@@ -174,10 +171,7 @@ Clone failed: $URL
               cd "_plugins/$PLUGIN_NAME"
               if ! git fetch origin "$REVISION" --depth 1 2>&1 || ! git checkout "$REVISION" 2>&1; then
                 echo "::error::Failed to checkout revision $REVISION for $PLUGIN_NAME"
-                REPORT="${REPORT}
-## ❌ ${PLUGIN_NAME}
-Revision checkout failed: $REVISION
-"
+                REPORT="${REPORT}$(printf '\n## ❌ %s\nRevision checkout failed: %s\n' "$PLUGIN_NAME" "$REVISION")"
                 OVERALL_VERDICT="BLOCKED"
                 cd ../..
                 echo "::endgroup::"
@@ -193,10 +187,7 @@ Revision checkout failed: $REVISION
 
             if [ -z "$SKILL_DIRS" ]; then
               echo "::warning::No skills found in $PLUGIN_NAME"
-              REPORT="${REPORT}
-## ⚠️ ${PLUGIN_NAME}
-No SKILL.md files found under skills/ directory.
-"
+              REPORT="${REPORT}$(printf '\n## ⚠️ %s\nNo SKILL.md files found under skills/ directory.\n' "$PLUGIN_NAME")"
               echo "::endgroup::"
               continue
             fi
@@ -214,10 +205,7 @@ No SKILL.md files found under skills/ directory.
               # Fail-Closed: claude CLI 실패 시 BLOCKED 처리
               if [ $CLAUDE_EXIT -ne 0 ] || [ -z "$RESULT" ]; then
                 echo "::error::Claude CLI failed for $PLUGIN_NAME/$SKILL_NAME (exit code: $CLAUDE_EXIT)"
-                REPORT="${REPORT}
-## ❌ ${PLUGIN_NAME}/${SKILL_NAME}
-Audit execution failed (exit code: ${CLAUDE_EXIT}). Treating as BLOCKED for safety.
-"
+                REPORT="${REPORT}$(printf '\n## ❌ %s/%s\nAudit execution failed (exit code: %s). Treating as BLOCKED for safety.\n' "$PLUGIN_NAME" "$SKILL_NAME" "$CLAUDE_EXIT")"
                 OVERALL_VERDICT="BLOCKED"
                 continue
               fi
@@ -233,9 +221,7 @@ Audit execution failed (exit code: ${CLAUDE_EXIT}). Treating as BLOCKED for safe
                 fi
               fi
 
-              REPORT="${REPORT}
-${RESULT}
-"
+              REPORT="${REPORT}$(printf '\n%s\n' "$RESULT")"
             done
             echo "::endgroup::"
           done

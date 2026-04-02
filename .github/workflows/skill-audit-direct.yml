@@ -1,0 +1,250 @@
+name: "Skill Audit: Direct Submission"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'skills/**'
+  workflow_dispatch:
+    inputs:
+      skill_path:
+        description: '검사할 스킬 디렉토리 경로 (예: skills/my-skill)'
+        required: true
+
+concurrency:
+  group: skill-audit-direct-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Job 1: scan (비신뢰 코드 실행, 최소 권한)
+  # ──────────────────────────────────────────────
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.audit.outputs.verdict }}
+      skill_count: ${{ steps.detect.outputs.count }}
+    steps:
+      - name: Checkout PR HEAD
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Audit tool은 base branch에서만 가져온다 (submodule 포인터 변조 방어)
+      - name: Checkout audit tool from base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout "$BASE_SHA" -- _audit-tool .gitmodules
+          git submodule update --init _audit-tool
+
+      - name: Checkout audit tool (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: git submodule update --init _audit-tool
+
+      - name: Detect changed skills
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SKILL_PATH: ${{ inputs.skill_path }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # 입력값 검증: skills/{name} 패턴만 허용
+            if ! echo "$INPUT_SKILL_PATH" | grep -qE '^skills/[a-zA-Z0-9._-]+$'; then
+              echo "::error::Invalid skill path: $INPUT_SKILL_PATH (must match skills/{name})"
+              exit 1
+            fi
+            echo "skills=$INPUT_SKILL_PATH" >> "$GITHUB_OUTPUT"
+            echo "count=1" >> "$GITHUB_OUTPUT"
+          else
+            CHANGED_SKILLS=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+              | grep '^skills/' \
+              | grep -v '^skills/\.gitkeep' \
+              | cut -d'/' -f1-2 \
+              | sort -u \
+              | tr '\n' ' ')
+            COUNT=$(echo "$CHANGED_SKILLS" | xargs -n1 2>/dev/null | wc -l | tr -d ' ')
+
+            echo "skills=$CHANGED_SKILLS" >> "$GITHUB_OUTPUT"
+            echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if no skills changed
+        if: steps.detect.outputs.count == '0'
+        run: echo "No skill directories changed. Skipping audit."
+
+      - name: Install Claude CLI
+        if: steps.detect.outputs.count != '0'
+        run: npm install -g @anthropic-ai/claude-code@0.2
+
+      - name: Run audit per skill
+        if: steps.detect.outputs.count != '0'
+        id: audit
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SKILL_LIST: ${{ steps.detect.outputs.skills }}
+          PR_ACTOR: ${{ github.actor }}
+        run: |
+          OVERALL_VERDICT="PASSED"
+          REPORT=""
+          AUDIT_TOOL_PATH="_audit-tool/skills/skill-security-audit"
+          RULESET_VERSION=$(cat "$AUDIT_TOOL_PATH/ruleset-version.txt" 2>/dev/null || echo "unknown")
+          RULESET_SHA=$(cd _audit-tool && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+          for SKILL_DIR in $SKILL_LIST; do
+            echo "::group::Auditing $SKILL_DIR"
+            SKILL_NAME=$(basename "$SKILL_DIR")
+
+            RESULT=$(claude --print \
+              "${AUDIT_TOOL_PATH} 스킬을 사용하여 ${SKILL_DIR} 스킬을 검사해줘. PR 제출자: ${PR_ACTOR}, Ruleset version: ${RULESET_VERSION}, Ruleset SHA: ${RULESET_SHA}. JSON 결과도 함께 출력해줘." \
+              2>&1)
+            CLAUDE_EXIT=$?
+
+            # Fail-Closed: claude CLI 실패 시 BLOCKED 처리 (API 키 누락, 네트워크 오류 등)
+            if [ $CLAUDE_EXIT -ne 0 ] || [ -z "$RESULT" ]; then
+              echo "::error::Claude CLI failed for $SKILL_DIR (exit code: $CLAUDE_EXIT)"
+              REPORT="${REPORT}
+## ❌ ${SKILL_DIR}
+Audit execution failed (exit code: ${CLAUDE_EXIT}). Treating as BLOCKED for safety.
+"
+              OVERALL_VERDICT="BLOCKED"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # verdict 판정: JSON "verdict" 필드 우선, fallback으로 텍스트 매칭
+            VERDICT_JSON=$(echo "$RESULT" | grep -oP '"verdict"\s*:\s*"\K[^"]+' | tail -1 || true)
+
+            if [ "$VERDICT_JSON" = "BLOCKED" ] || { [ -z "$VERDICT_JSON" ] && echo "$RESULT" | grep -q '"BLOCKED"'; }; then
+              SKILL_VERDICT="BLOCKED"
+              OVERALL_VERDICT="BLOCKED"
+            elif [ "$VERDICT_JSON" = "PASSED_WITH_WARNINGS" ] || { [ -z "$VERDICT_JSON" ] && echo "$RESULT" | grep -q "PASSED with warnings"; }; then
+              SKILL_VERDICT="PASSED_WITH_WARNINGS"
+              if [ "$OVERALL_VERDICT" != "BLOCKED" ]; then
+                OVERALL_VERDICT="PASSED_WITH_WARNINGS"
+              fi
+            else
+              SKILL_VERDICT="PASSED"
+            fi
+
+            REPORT="${REPORT}
+${RESULT}
+"
+            echo "::endgroup::"
+          done
+
+          echo "$REPORT" > /tmp/audit-report.md
+          echo "verdict=$OVERALL_VERDICT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload audit report
+        if: steps.detect.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: direct-audit-report
+          path: /tmp/audit-report.md
+          retention-days: 30
+
+  # ──────────────────────────────────────────────
+  # Job 2: report (신뢰된 job, PR 코멘트/체크 작성)
+  # ──────────────────────────────────────────────
+  report:
+    needs: scan
+    if: github.event_name == 'pull_request' && needs.scan.outputs.skill_count != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      checks: write
+    steps:
+      - name: Download audit report
+        uses: actions/download-artifact@v4
+        with:
+          name: direct-audit-report
+          path: /tmp
+
+      - name: Update PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/audit-report.md', 'utf8');
+            const verdict = '${{ needs.scan.outputs.verdict }}';
+            const marker = '<!-- skill-audit-direct -->';
+            const icon = verdict === 'BLOCKED' ? '❌' : verdict === 'PASSED_WITH_WARNINGS' ? '⚠️' : '✅';
+            const body = `${marker}\n## ${icon} Skill Audit Results (Direct Submission)\n\n**Verdict: ${verdict}**\n\n${report}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Set check run status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const verdict = '${{ needs.scan.outputs.verdict }}';
+            const conclusion = verdict === 'BLOCKED' ? 'failure' : 'success';
+            const title = verdict === 'BLOCKED'
+              ? '❌ BLOCKED — CRITICAL findings detected'
+              : verdict === 'PASSED_WITH_WARNINGS'
+                ? '⚠️ PASSED with warnings'
+                : '✅ PASSED';
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Skill Security Audit (Direct)',
+              head_sha: '${{ github.event.pull_request.head.sha }}',
+              status: 'completed',
+              conclusion,
+              output: { title, summary: `Audit verdict: ${verdict}` },
+            });
+
+      - name: Send Slack notification
+        if: needs.scan.outputs.verdict == 'BLOCKED'
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PR_ACTOR: ${{ github.actor }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL not set. Skipping."
+            exit 0
+          fi
+
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"blocks\": [
+                {\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\"❌ Skill Audit BLOCKED (Direct)\",\"emoji\":true}},
+                {\"type\":\"section\",\"fields\":[
+                  {\"type\":\"mrkdwn\",\"text\":\"*제출자:* ${PR_ACTOR}\"},
+                  {\"type\":\"mrkdwn\",\"text\":\"*PR:* #${PR_NUMBER}\"}
+                ]},
+                {\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"CRITICAL findings 감지. PR에서 상세 내역 확인:\\n→ ${PR_URL}\"}}
+              ]
+            }"

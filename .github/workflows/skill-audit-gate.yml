@@ -1,0 +1,73 @@
+name: "Skill Audit Gate"
+
+# 모든 PR에서 항상 실행되는 정보 표시용 워크플로우.
+# 실제 머지 차단은 "Skill Security Audit (Direct)" / "Skill Security Audit (Remote)"
+# check를 branch protection의 required check로 설정하여 수행한다.
+# 이 gate는 감사 대상이 없는 PR에서 정보를 표시하고,
+# 감사 대상이 있는 경우 어떤 워크플로우가 트리거되었는지 안내한다.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine audit scope
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          if echo "$CHANGED_FILES" | grep -q '^skills/'; then
+            echo "has_direct=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_direct=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$CHANGED_FILES" | grep -q '^\.claude-plugin/marketplace\.json$'; then
+            echo "has_remote=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_remote=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report gate status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const hasDirect = '${{ steps.scope.outputs.has_direct }}' === 'true';
+            const hasRemote = '${{ steps.scope.outputs.has_remote }}' === 'true';
+
+            let summary = '';
+            if (!hasDirect && !hasRemote) {
+              summary = 'No audit-targeted changes detected. No skill audit required for this PR.';
+            } else {
+              const targets = [];
+              if (hasDirect) targets.push('**Direct** — skills/** changed → "Skill Security Audit (Direct)" check');
+              if (hasRemote) targets.push('**Remote** — marketplace.json changed → "Skill Security Audit (Remote)" check');
+              summary = `Audit triggered for:\n${targets.map(t => `- ${t}`).join('\n')}\n\nSee individual check results for audit verdicts. Merge is blocked if any check reports BLOCKED.`;
+            }
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Skill Audit Gate',
+              head_sha: '${{ github.event.pull_request.head.sha }}',
+              status: 'completed',
+              conclusion: 'success',
+              output: {
+                title: hasDirect || hasRemote ? '🔍 Audit triggered — see individual checks' : '✅ No audit needed',
+                summary,
+              },
+            });

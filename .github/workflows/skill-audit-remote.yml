@@ -1,0 +1,352 @@
+name: "Skill Audit: Remote Plugin"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.claude-plugin/marketplace.json'
+  workflow_dispatch:
+    inputs:
+      plugin_name:
+        description: '검사할 플러그인 이름 (marketplace.json의 name 필드)'
+        required: true
+
+concurrency:
+  group: skill-audit-remote-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Job 1: scan (비신뢰 코드 실행, 최소 권한)
+  # ──────────────────────────────────────────────
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.audit.outputs.verdict }}
+      plugin_count: ${{ steps.detect.outputs.count }}
+    steps:
+      - name: Checkout PR HEAD
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Audit tool은 base branch에서만 가져온다 (submodule 포인터 변조 방어)
+      - name: Checkout audit tool from base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout "$BASE_SHA" -- _audit-tool .gitmodules
+          git submodule update --init _audit-tool
+
+      - name: Checkout audit tool (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: git submodule update --init _audit-tool
+
+      # ── marketplace.json diff 파싱 (name 기준 map 비교) ──
+      - name: Detect changed plugins
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PLUGIN_NAME: ${{ inputs.plugin_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # 입력값 검증: 영숫자, 하이픈, 언더스코어만 허용
+            if ! echo "$INPUT_PLUGIN_NAME" | grep -qE '^[a-zA-Z0-9._-]+$'; then
+              echo "::error::Invalid plugin name: $INPUT_PLUGIN_NAME"
+              exit 1
+            fi
+
+            jq --arg name "$INPUT_PLUGIN_NAME" \
+              '[.plugins[] | select(.name == $name)]' \
+              .claude-plugin/marketplace.json > /tmp/changed-plugins.json
+
+            COUNT=$(jq 'length' /tmp/changed-plugins.json)
+            if [ "$COUNT" -eq 0 ]; then
+              echo "::error::Plugin '$INPUT_PLUGIN_NAME' not found in marketplace.json"
+              exit 1
+            fi
+            echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # base marketplace.json 추출
+          git show "$BASE_SHA:.claude-plugin/marketplace.json" > /tmp/base.json 2>/dev/null \
+            || echo '{"plugins":[]}' > /tmp/base.json
+
+          # name 기준 map으로 변환하여 비교
+          BASE_MAP=$(jq '[.plugins[] | {key: .name, value: .}] | from_entries' /tmp/base.json)
+          HEAD_MAP=$(jq '[.plugins[] | {key: .name, value: .}] | from_entries' .claude-plugin/marketplace.json)
+
+          # 새로 추가되거나 version/revision/source가 변경된 플러그인 추출
+          jq -n \
+            --argjson base "$BASE_MAP" \
+            --argjson head "$HEAD_MAP" \
+            '[
+              $head | to_entries[] | select(
+                ($base[.key] == null) or
+                (.value.version != $base[.key].version) or
+                (.value.revision != $base[.key].revision) or
+                (.value.source.url != $base[.key].source.url)
+              ) | .value
+            ]' > /tmp/changed-plugins.json
+
+          COUNT=$(jq 'length' /tmp/changed-plugins.json)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if no plugins changed
+        if: steps.detect.outputs.count == '0'
+        run: echo "No plugin changes detected. Skipping audit."
+
+      # ── URL allowlist 검증 ──
+      - name: Validate plugin URLs
+        if: steps.detect.outputs.count != '0'
+        run: |
+          URL_PATTERN='^https://github\.com/[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+(\.git)?$'
+
+          jq -r '.[].source.url' /tmp/changed-plugins.json | while read -r URL; do
+            if ! echo "$URL" | grep -qE "$URL_PATTERN"; then
+              echo "::error::Blocked URL: $URL (only https://github.com/{owner}/{repo} allowed)"
+              exit 1
+            fi
+            echo "✓ URL validated: $URL"
+          done
+
+      # ── 플러그인 이름 검증 ──
+      - name: Validate plugin names
+        if: steps.detect.outputs.count != '0'
+        run: |
+          jq -r '.[].name' /tmp/changed-plugins.json | while read -r NAME; do
+            if ! echo "$NAME" | grep -qE '^[a-zA-Z0-9._-]+$'; then
+              echo "::error::Invalid plugin name: $NAME"
+              exit 1
+            fi
+          done
+
+      # ── 플러그인 클론 + 감사 ──
+      - name: Install Claude CLI
+        if: steps.detect.outputs.count != '0'
+        run: npm install -g @anthropic-ai/claude-code@0.2
+
+      - name: Clone plugins and run audit
+        if: steps.detect.outputs.count != '0'
+        id: audit
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_ACTOR: ${{ github.actor }}
+        run: |
+          OVERALL_VERDICT="PASSED"
+          REPORT=""
+          AUDIT_TOOL_PATH="_audit-tool/skills/skill-security-audit"
+          RULESET_VERSION=$(cat "$AUDIT_TOOL_PATH/ruleset-version.txt" 2>/dev/null || echo "unknown")
+          RULESET_SHA=$(cd _audit-tool && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+          mkdir -p _plugins
+          PLUGIN_COUNT=$(jq 'length' /tmp/changed-plugins.json)
+
+          for i in $(seq 0 $((PLUGIN_COUNT - 1))); do
+            PLUGIN_NAME=$(jq -r ".[$i].name" /tmp/changed-plugins.json)
+            URL=$(jq -r ".[$i].source.url" /tmp/changed-plugins.json)
+            REVISION=$(jq -r ".[$i].revision // \"\"" /tmp/changed-plugins.json)
+
+            echo "::group::Processing plugin: $PLUGIN_NAME"
+
+            # Shallow clone (보안 제한)
+            echo "Cloning $URL ..."
+            timeout 120 git clone --depth 1 --no-tags --recurse-submodules=no \
+              "$URL" "_plugins/$PLUGIN_NAME" 2>&1 || {
+              echo "::error::Failed to clone $URL"
+              REPORT="${REPORT}
+## ❌ ${PLUGIN_NAME}
+Clone failed: $URL
+"
+              OVERALL_VERDICT="BLOCKED"
+              echo "::endgroup::"
+              continue
+            }
+
+            # revision이 있으면 해당 SHA로 checkout (실패 시 BLOCKED)
+            if [ -n "$REVISION" ] && [ "$REVISION" != "null" ]; then
+              echo "Checking out revision: $REVISION"
+              cd "_plugins/$PLUGIN_NAME"
+              if ! git fetch origin "$REVISION" --depth 1 2>&1 || ! git checkout "$REVISION" 2>&1; then
+                echo "::error::Failed to checkout revision $REVISION for $PLUGIN_NAME"
+                REPORT="${REPORT}
+## ❌ ${PLUGIN_NAME}
+Revision checkout failed: $REVISION
+"
+                OVERALL_VERDICT="BLOCKED"
+                cd ../..
+                echo "::endgroup::"
+                continue
+              fi
+              cd ../..
+            fi
+
+            # 스킬 디렉토리 탐색
+            SKILL_DIRS=$(find "_plugins/$PLUGIN_NAME/skills" -name "SKILL.md" -maxdepth 2 2>/dev/null \
+              | xargs -I{} dirname {} \
+              | sort -u)
+
+            if [ -z "$SKILL_DIRS" ]; then
+              echo "::warning::No skills found in $PLUGIN_NAME"
+              REPORT="${REPORT}
+## ⚠️ ${PLUGIN_NAME}
+No SKILL.md files found under skills/ directory.
+"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # 각 스킬 감사
+            for SKILL_DIR in $SKILL_DIRS; do
+              SKILL_NAME=$(basename "$SKILL_DIR")
+              echo "Auditing: $PLUGIN_NAME/$SKILL_NAME"
+
+              RESULT=$(claude --print \
+                "${AUDIT_TOOL_PATH} 스킬을 사용하여 ${SKILL_DIR} 스킬을 검사해줘. PR 제출자: ${PR_ACTOR}, Ruleset version: ${RULESET_VERSION}, Ruleset SHA: ${RULESET_SHA}. 플러그인: ${PLUGIN_NAME}, Revision: ${REVISION:-HEAD}. JSON 결과도 함께 출력해줘." \
+                2>&1)
+              CLAUDE_EXIT=$?
+
+              # Fail-Closed: claude CLI 실패 시 BLOCKED 처리
+              if [ $CLAUDE_EXIT -ne 0 ] || [ -z "$RESULT" ]; then
+                echo "::error::Claude CLI failed for $PLUGIN_NAME/$SKILL_NAME (exit code: $CLAUDE_EXIT)"
+                REPORT="${REPORT}
+## ❌ ${PLUGIN_NAME}/${SKILL_NAME}
+Audit execution failed (exit code: ${CLAUDE_EXIT}). Treating as BLOCKED for safety.
+"
+                OVERALL_VERDICT="BLOCKED"
+                continue
+              fi
+
+              # verdict 판정: JSON "verdict" 필드 우선, fallback으로 텍스트 매칭
+              VERDICT_JSON=$(echo "$RESULT" | grep -oP '"verdict"\s*:\s*"\K[^"]+' | tail -1 || true)
+
+              if [ "$VERDICT_JSON" = "BLOCKED" ] || { [ -z "$VERDICT_JSON" ] && echo "$RESULT" | grep -q '"BLOCKED"'; }; then
+                OVERALL_VERDICT="BLOCKED"
+              elif [ "$VERDICT_JSON" = "PASSED_WITH_WARNINGS" ] || { [ -z "$VERDICT_JSON" ] && echo "$RESULT" | grep -q "PASSED with warnings"; }; then
+                if [ "$OVERALL_VERDICT" != "BLOCKED" ]; then
+                  OVERALL_VERDICT="PASSED_WITH_WARNINGS"
+                fi
+              fi
+
+              REPORT="${REPORT}
+${RESULT}
+"
+            done
+            echo "::endgroup::"
+          done
+
+          echo "$REPORT" > /tmp/audit-report.md
+          echo "verdict=$OVERALL_VERDICT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload audit report
+        if: steps.detect.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-audit-report
+          path: /tmp/audit-report.md
+          retention-days: 30
+
+  # ──────────────────────────────────────────────
+  # Job 2: report (신뢰된 job, PR 코멘트/체크 작성)
+  # ──────────────────────────────────────────────
+  report:
+    needs: scan
+    if: github.event_name == 'pull_request' && needs.scan.outputs.plugin_count != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      checks: write
+    steps:
+      - name: Download audit report
+        uses: actions/download-artifact@v4
+        with:
+          name: remote-audit-report
+          path: /tmp
+
+      - name: Update PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/audit-report.md', 'utf8');
+            const verdict = '${{ needs.scan.outputs.verdict }}';
+            const marker = '<!-- skill-audit-remote -->';
+            const icon = verdict === 'BLOCKED' ? '❌' : verdict === 'PASSED_WITH_WARNINGS' ? '⚠️' : '✅';
+            const body = `${marker}\n## ${icon} Skill Audit Results (Remote Plugin)\n\n**Verdict: ${verdict}**\n\n${report}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Set check run status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const verdict = '${{ needs.scan.outputs.verdict }}';
+            const conclusion = verdict === 'BLOCKED' ? 'failure' : 'success';
+            const title = verdict === 'BLOCKED'
+              ? '❌ BLOCKED — CRITICAL findings detected'
+              : verdict === 'PASSED_WITH_WARNINGS'
+                ? '⚠️ PASSED with warnings'
+                : '✅ PASSED';
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Skill Security Audit (Remote)',
+              head_sha: '${{ github.event.pull_request.head.sha }}',
+              status: 'completed',
+              conclusion,
+              output: { title, summary: `Audit verdict: ${verdict}` },
+            });
+
+      - name: Send Slack notification
+        if: needs.scan.outputs.verdict == 'BLOCKED'
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PR_ACTOR: ${{ github.actor }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL not set. Skipping."
+            exit 0
+          fi
+
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"blocks\": [
+                {\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\"❌ Skill Audit BLOCKED (Remote Plugin)\",\"emoji\":true}},
+                {\"type\":\"section\",\"fields\":[
+                  {\"type\":\"mrkdwn\",\"text\":\"*제출자:* ${PR_ACTOR}\"},
+                  {\"type\":\"mrkdwn\",\"text\":\"*PR:* #${PR_NUMBER}\"}
+                ]},
+                {\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"Remote 플러그인에서 CRITICAL findings 감지.\\n→ ${PR_URL}\"}}
+              ]
+            }"

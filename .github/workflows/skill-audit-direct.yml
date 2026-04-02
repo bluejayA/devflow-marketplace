@@ -80,7 +80,7 @@ jobs:
 
       - name: Install Claude CLI
         if: steps.detect.outputs.count != '0'
-        run: npm install -g @anthropic-ai/claude-code@0.2
+        run: npm install -g @anthropic-ai/claude-code@latest
 
       - name: Run audit per skill
         if: steps.detect.outputs.count != '0'

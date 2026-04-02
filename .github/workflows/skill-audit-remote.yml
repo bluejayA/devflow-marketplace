@@ -129,7 +129,7 @@ jobs:
       # ── 플러그인 클론 + 감사 ──
       - name: Install Claude CLI
         if: steps.detect.outputs.count != '0'
-        run: npm install -g @anthropic-ai/claude-code@0.2
+        run: npm install -g @anthropic-ai/claude-code@latest
 
       - name: Clone plugins and run audit
         if: steps.detect.outputs.count != '0'

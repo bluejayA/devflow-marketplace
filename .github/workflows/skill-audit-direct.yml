@@ -62,9 +62,10 @@ jobs:
             echo "skills=$INPUT_SKILL_PATH" >> "$GITHUB_OUTPUT"
             echo "count=1" >> "$GITHUB_OUTPUT"
           else
+            # audit 대상: SKILL.md, references/, assets/ 변경이 있는 스킬만
             CHANGED_SKILLS=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
               | grep '^skills/' \
-              | grep -v '^skills/\.gitkeep' \
+              | grep -E '(SKILL\.md|references/|assets/)' \
               | cut -d'/' -f1-2 \
               | sort -u \
               | tr '\n' ' ')

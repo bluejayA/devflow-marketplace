@@ -214,6 +214,12 @@ headless 모드에서는:
 
 ---
 
+## Examples
+
+사용 시나리오별 상세 입출력 예시는 `references/examples.md`를 참조한다.
+
+---
+
 ## Troubleshooting
 
 | 증상 | 원인 | 해결 |

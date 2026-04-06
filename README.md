@@ -18,6 +18,14 @@ This gives you access to all registered plugins and their skills.
 | [reverse-engineering](https://github.com/bluejayA/devflow-reverse-engineering) | 0.4.0 | Brownfield codebase analysis (4-phase pipeline, 3 modes) |
 | [skill-security-audit](https://github.com/bluejayA/skill-security-audit) | 2.0.0 | Skill security gatekeeper (35 rules, OWASP AST10) |
 
+## Direct Skills
+
+Standalone skills shipped directly in this repository (`skills/` directory):
+
+| Skill | Version | Description |
+|-------|---------|-------------|
+| [cargo-review](skills/cargo-review/) | 2.0.0 | Rust code review (Correctness/Style/Suggestions 3-axis report, parallel subagent, refactoring mode) |
+
 ## Submitting a Plugin
 
 ### Option A: Direct Skill Submission

@@ -14,7 +14,7 @@ This gives you access to all registered plugins and their skills.
 
 | Plugin | Version | Description |
 |--------|---------|-------------|
-| [aidlc](https://github.com/bluejayA/aidlc-devflow) | 1.8.0 | AI-DLC methodology development workflow (28 skills, 5 agents, 4-stage code review) |
+| [aidlc](https://github.com/bluejayA/aidlc-devflow) | 1.10.0 | AI-DLC methodology workflow (v1.10.0 Knowledge System Phase 1: 6-type taxonomy, Solution layer, L1 ingest hook, skill_nature lifecycle tagging; 28 skills + 3 utils, 4-stage code review) |
 | [reverse-engineering](https://github.com/bluejayA/devflow-reverse-engineering) | 0.4.0 | Brownfield codebase analysis (4-phase pipeline, 3 modes) |
 | [skill-security-audit](https://github.com/bluejayA/skill-security-audit) | 2.0.0 | Skill security gatekeeper (35 rules, OWASP AST10) |
 

@@ -127,6 +127,28 @@ jobs:
             fi
           done
 
+      # ── revision SHA 형식 검증 (diff-scoping으로 shell에 흘러들기 전 방어) ──
+      - name: Validate revision SHAs
+        if: steps.detect.outputs.count != '0'
+        run: |
+          SHA_PATTERN='^[a-f0-9]{7,40}$'
+
+          # new revision (필수)
+          jq -r '.[].revision // ""' /tmp/changed-plugins.json | while read -r REV; do
+            if [ -n "$REV" ] && ! echo "$REV" | grep -qE "$SHA_PATTERN"; then
+              echo "::error::Invalid revision SHA: $REV"
+              exit 1
+            fi
+          done
+
+          # old revision (있을 때만)
+          jq -r '.[].old_revision // ""' /tmp/changed-plugins.json | while read -r REV; do
+            if [ -n "$REV" ] && ! echo "$REV" | grep -qE "$SHA_PATTERN"; then
+              echo "::error::Invalid old_revision SHA: $REV"
+              exit 1
+            fi
+          done
+
       # ── 플러그인 클론 + 감사 ──
       - name: Install Claude CLI
         if: steps.detect.outputs.count != '0'
@@ -185,25 +207,35 @@ jobs:
             # ── 스킬 디렉토리 선별 (diff-scoping) ──
             # OLD_REVISION이 있으면 old..new 변경된 스킬만, 없으면(신규 플러그인) 전수 감사.
             # skills/_shared/ 또는 skills/_* 공유 경로가 바뀌면 전수 감사로 fallback.
-            SCOPE_MODE="full"
+            #
+            # SCOPE_KIND: enum — 제어 흐름용 (diff / full / full_shared / full_fetch_failed / full_new_plugin)
+            # SCOPE_DESC: 사람이 읽는 라벨 — 로그/리포트용만 사용
+            SCOPE_KIND="full_new_plugin"
+            SCOPE_DESC="full (no old revision)"
             SKILL_DIRS=""
             if [ -n "$OLD_REVISION" ] && [ "$OLD_REVISION" != "null" ] && [ "$OLD_REVISION" != "$REVISION" ]; then
-              (cd "_plugins/$PLUGIN_NAME" && git fetch origin "$OLD_REVISION" --depth 1 2>&1) \
-                && DIFF_OK=1 || DIFF_OK=0
+              if (cd "_plugins/$PLUGIN_NAME" && git fetch origin "$OLD_REVISION" --depth 1 2>&1); then
+                DIFF_OK=1
+              else
+                DIFF_OK=0
+              fi
 
               if [ "$DIFF_OK" = "1" ]; then
                 CHANGED_PATHS=$(cd "_plugins/$PLUGIN_NAME" \
                   && git diff --name-only "$OLD_REVISION" "$REVISION" -- 'skills/' 2>/dev/null)
 
-                # 공유 경로(skills/_*) 변경 시 전수 감사로 fallback
-                SHARED_CHANGED=$(echo "$CHANGED_PATHS" | awk -F/ 'NF>=2 && $2 ~ /^_/' | head -1)
+                # 공유 경로(skills/_*/) 변경 시 전수 감사로 fallback
+                # NF>=3: skills/_shared/x.md 같은 파일만 매치 (skills/ 직하 파일/디렉토리 제외)
+                SHARED_CHANGED=$(echo "$CHANGED_PATHS" | awk -F/ 'NF>=3 && $2 ~ /^_/' | head -1)
 
                 if [ -n "$SHARED_CHANGED" ]; then
                   echo "::notice::$PLUGIN_NAME: shared skills path changed ($SHARED_CHANGED) → auditing all skills"
-                  SCOPE_MODE="full (shared-path changed)"
+                  SCOPE_KIND="full_shared"
+                  SCOPE_DESC="full (shared-path changed)"
                 else
+                  # NF>=3: skills/<name>/... 경로만 (skills/top-level.md 같은 직하 파일 제외)
                   CHANGED_DIRS=$(echo "$CHANGED_PATHS" \
-                    | awk -F/ 'NF>=2 && $2 !~ /^_/ {print $1"/"$2}' \
+                    | awk -F/ 'NF>=3 && $2 !~ /^_/ {print $1"/"$2}' \
                     | sort -u)
 
                   for REL in $CHANGED_DIRS; do
@@ -212,25 +244,27 @@ jobs:
                     fi
                   done
                   SKILL_DIRS=$(echo "$SKILL_DIRS" | sed '/^$/d')
-                  SCOPE_MODE="diff ($OLD_REVISION..$REVISION)"
+                  SCOPE_KIND="diff"
+                  SCOPE_DESC="diff (${OLD_REVISION:0:7}..${REVISION:0:7})"
                 fi
               else
                 echo "::warning::$PLUGIN_NAME: failed to fetch old revision $OLD_REVISION → falling back to full audit"
-                SCOPE_MODE="full (old-rev fetch failed)"
+                SCOPE_KIND="full_fetch_failed"
+                SCOPE_DESC="full (old-rev fetch failed)"
               fi
             else
               echo "::notice::$PLUGIN_NAME: no old_revision (new plugin) → full audit"
             fi
 
-            # full 모드이거나 diff가 비어있으면 전수 탐색
-            if [ "$SCOPE_MODE" != "diff ($OLD_REVISION..$REVISION)" ]; then
+            # diff 모드가 아니면 전수 탐색
+            if [ "$SCOPE_KIND" != "diff" ]; then
               SKILL_DIRS=$(find "_plugins/$PLUGIN_NAME/skills" -name "SKILL.md" -maxdepth 2 2>/dev/null \
                 | xargs -I{} dirname {} \
                 | sort -u)
             fi
 
             if [ -z "$SKILL_DIRS" ]; then
-              if [[ "$SCOPE_MODE" == diff* ]]; then
+              if [ "$SCOPE_KIND" = "diff" ]; then
                 echo "::notice::$PLUGIN_NAME: no skill changes in diff — skipping audit"
                 REPORT="${REPORT}$(printf '\n## ℹ️ %s\nNo skill code changes detected in %s..%s — audit skipped.\n' "$PLUGIN_NAME" "${OLD_REVISION:0:7}" "${REVISION:0:7}")"
               else
@@ -241,8 +275,9 @@ jobs:
               continue
             fi
 
-            echo "Audit scope: $SCOPE_MODE"
-            echo "Skills to audit ($(echo "$SKILL_DIRS" | wc -l | tr -d ' ')):"
+            SKILL_COUNT=$(echo "$SKILL_DIRS" | grep -c .)
+            echo "Audit scope: $SCOPE_DESC"
+            echo "Skills to audit ($SKILL_COUNT):"
             echo "$SKILL_DIRS"
 
             # 각 스킬 감사

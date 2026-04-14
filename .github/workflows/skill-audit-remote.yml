@@ -82,6 +82,7 @@ jobs:
           HEAD_MAP=$(jq '[.plugins[] | {key: .name, value: .}] | from_entries' .claude-plugin/marketplace.json)
 
           # 새로 추가되거나 version/revision/source가 변경된 플러그인 추출
+          # old_revision도 함께 포함시켜 audit 단계에서 diff-scoping에 사용
           jq -n \
             --argjson base "$BASE_MAP" \
             --argjson head "$HEAD_MAP" \
@@ -91,7 +92,7 @@ jobs:
                 (.value.version != $base[.key].version) or
                 (.value.revision != $base[.key].revision) or
                 (.value.source.url != $base[.key].source.url)
-              ) | .value
+              ) | .value + {old_revision: ($base[.key].revision // null)}
             ]' > /tmp/changed-plugins.json
 
           COUNT=$(jq 'length' /tmp/changed-plugins.json)
@@ -126,6 +127,28 @@ jobs:
             fi
           done
 
+      # ── revision SHA 형식 검증 (diff-scoping으로 shell에 흘러들기 전 방어) ──
+      - name: Validate revision SHAs
+        if: steps.detect.outputs.count != '0'
+        run: |
+          SHA_PATTERN='^[a-f0-9]{7,40}$'
+
+          # new revision (필수)
+          jq -r '.[].revision // ""' /tmp/changed-plugins.json | while read -r REV; do
+            if [ -n "$REV" ] && ! echo "$REV" | grep -qE "$SHA_PATTERN"; then
+              echo "::error::Invalid revision SHA: $REV"
+              exit 1
+            fi
+          done
+
+          # old revision (있을 때만)
+          jq -r '.[].old_revision // ""' /tmp/changed-plugins.json | while read -r REV; do
+            if [ -n "$REV" ] && ! echo "$REV" | grep -qE "$SHA_PATTERN"; then
+              echo "::error::Invalid old_revision SHA: $REV"
+              exit 1
+            fi
+          done
+
       # ── 플러그인 클론 + 감사 ──
       - name: Install Claude CLI
         if: steps.detect.outputs.count != '0'
@@ -151,6 +174,7 @@ jobs:
             PLUGIN_NAME=$(jq -r ".[$i].name" /tmp/changed-plugins.json)
             URL=$(jq -r ".[$i].source.url" /tmp/changed-plugins.json)
             REVISION=$(jq -r ".[$i].revision // \"\"" /tmp/changed-plugins.json)
+            OLD_REVISION=$(jq -r ".[$i].old_revision // \"\"" /tmp/changed-plugins.json)
 
             echo "::group::Processing plugin: $PLUGIN_NAME"
 
@@ -180,32 +204,102 @@ jobs:
               cd ../..
             fi
 
-            # 스킬 디렉토리 탐색
-            SKILL_DIRS=$(find "_plugins/$PLUGIN_NAME/skills" -name "SKILL.md" -maxdepth 2 2>/dev/null \
-              | xargs -I{} dirname {} \
-              | sort -u)
+            # ── 스킬 디렉토리 선별 (diff-scoping) ──
+            # OLD_REVISION이 있으면 old..new 변경된 스킬만, 없으면(신규 플러그인) 전수 감사.
+            # skills/_shared/ 또는 skills/_* 공유 경로가 바뀌면 전수 감사로 fallback.
+            #
+            # SCOPE_KIND: enum — 제어 흐름용 (diff / full / full_shared / full_fetch_failed / full_new_plugin)
+            # SCOPE_DESC: 사람이 읽는 라벨 — 로그/리포트용만 사용
+            SCOPE_KIND="full_new_plugin"
+            SCOPE_DESC="full (no old revision)"
+            SKILL_DIRS=""
+            if [ -n "$OLD_REVISION" ] && [ "$OLD_REVISION" != "null" ] && [ "$OLD_REVISION" != "$REVISION" ]; then
+              if (cd "_plugins/$PLUGIN_NAME" && git fetch origin "$OLD_REVISION" --depth 1 2>&1); then
+                DIFF_OK=1
+              else
+                DIFF_OK=0
+              fi
+
+              if [ "$DIFF_OK" = "1" ]; then
+                CHANGED_PATHS=$(cd "_plugins/$PLUGIN_NAME" \
+                  && git diff --name-only "$OLD_REVISION" "$REVISION" -- 'skills/' 2>/dev/null)
+
+                # 공유 경로(skills/_*/) 변경 시 전수 감사로 fallback
+                # NF>=3: skills/_shared/x.md 같은 파일만 매치 (skills/ 직하 파일/디렉토리 제외)
+                SHARED_CHANGED=$(echo "$CHANGED_PATHS" | awk -F/ 'NF>=3 && $2 ~ /^_/' | head -1)
+
+                if [ -n "$SHARED_CHANGED" ]; then
+                  echo "::notice::$PLUGIN_NAME: shared skills path changed ($SHARED_CHANGED) → auditing all skills"
+                  SCOPE_KIND="full_shared"
+                  SCOPE_DESC="full (shared-path changed)"
+                else
+                  # NF>=3: skills/<name>/... 경로만 (skills/top-level.md 같은 직하 파일 제외)
+                  CHANGED_DIRS=$(echo "$CHANGED_PATHS" \
+                    | awk -F/ 'NF>=3 && $2 !~ /^_/ {print $1"/"$2}' \
+                    | sort -u)
+
+                  for REL in $CHANGED_DIRS; do
+                    if [ -f "_plugins/$PLUGIN_NAME/$REL/SKILL.md" ]; then
+                      SKILL_DIRS="${SKILL_DIRS}_plugins/$PLUGIN_NAME/$REL"$'\n'
+                    fi
+                  done
+                  SKILL_DIRS=$(echo "$SKILL_DIRS" | sed '/^$/d')
+                  SCOPE_KIND="diff"
+                  SCOPE_DESC="diff (${OLD_REVISION:0:7}..${REVISION:0:7})"
+                fi
+              else
+                echo "::warning::$PLUGIN_NAME: failed to fetch old revision $OLD_REVISION → falling back to full audit"
+                SCOPE_KIND="full_fetch_failed"
+                SCOPE_DESC="full (old-rev fetch failed)"
+              fi
+            else
+              echo "::notice::$PLUGIN_NAME: no old_revision (new plugin) → full audit"
+            fi
+
+            # diff 모드가 아니면 전수 탐색
+            if [ "$SCOPE_KIND" != "diff" ]; then
+              SKILL_DIRS=$(find "_plugins/$PLUGIN_NAME/skills" -name "SKILL.md" -maxdepth 2 2>/dev/null \
+                | xargs -I{} dirname {} \
+                | sort -u)
+            fi
 
             if [ -z "$SKILL_DIRS" ]; then
-              echo "::warning::No skills found in $PLUGIN_NAME"
-              REPORT="${REPORT}$(printf '\n## ⚠️ %s\nNo SKILL.md files found under skills/ directory.\n' "$PLUGIN_NAME")"
+              if [ "$SCOPE_KIND" = "diff" ]; then
+                echo "::notice::$PLUGIN_NAME: no skill changes in diff — skipping audit"
+                REPORT="${REPORT}$(printf '\n## ℹ️ %s\nNo skill code changes detected in %s..%s — audit skipped.\n' "$PLUGIN_NAME" "${OLD_REVISION:0:7}" "${REVISION:0:7}")"
+              else
+                echo "::warning::No skills found in $PLUGIN_NAME"
+                REPORT="${REPORT}$(printf '\n## ⚠️ %s\nNo SKILL.md files found under skills/ directory.\n' "$PLUGIN_NAME")"
+              fi
               echo "::endgroup::"
               continue
             fi
+
+            SKILL_COUNT=$(echo "$SKILL_DIRS" | grep -c .)
+            echo "Audit scope: $SCOPE_DESC"
+            echo "Skills to audit ($SKILL_COUNT):"
+            echo "$SKILL_DIRS"
 
             # 각 스킬 감사
             for SKILL_DIR in $SKILL_DIRS; do
               SKILL_NAME=$(basename "$SKILL_DIR")
               echo "Auditing: $PLUGIN_NAME/$SKILL_NAME"
 
-              RESULT=$(claude --print \
+              # per-skill 타임아웃 300초 (timeout exit code 124 = 상한 초과)
+              RESULT=$(timeout 300 claude --print \
                 "${AUDIT_TOOL_PATH} 스킬을 사용하여 ${SKILL_DIR} 스킬을 검사해줘. PR 제출자: ${PR_ACTOR}, Ruleset version: ${RULESET_VERSION}, Ruleset SHA: ${RULESET_SHA}. 플러그인: ${PLUGIN_NAME}, Revision: ${REVISION:-HEAD}. JSON 결과도 함께 출력해줘." \
                 2>&1)
               CLAUDE_EXIT=$?
 
-              # Fail-Closed: claude CLI 실패 시 BLOCKED 처리
+              # Fail-Closed: claude CLI 실패 / 타임아웃 시 BLOCKED 처리
               if [ $CLAUDE_EXIT -ne 0 ] || [ -z "$RESULT" ]; then
-                echo "::error::Claude CLI failed for $PLUGIN_NAME/$SKILL_NAME (exit code: $CLAUDE_EXIT)"
-                REPORT="${REPORT}$(printf '\n## ❌ %s/%s\nAudit execution failed (exit code: %s). Treating as BLOCKED for safety.\n' "$PLUGIN_NAME" "$SKILL_NAME" "$CLAUDE_EXIT")"
+                if [ $CLAUDE_EXIT -eq 124 ]; then
+                  echo "::error::Claude CLI timed out (>300s) for $PLUGIN_NAME/$SKILL_NAME"
+                  REPORT="${REPORT}$(printf '\n## ❌ %s/%s\nAudit timed out after 300s. Treating as BLOCKED for safety.\n' "$PLUGIN_NAME" "$SKILL_NAME")"
+                else
+                  echo "::error::Claude CLI failed for $PLUGIN_NAME/$SKILL_NAME (exit code: $CLAUDE_EXIT)"
+                  REPORT="${REPORT}$(printf '\n## ❌ %s/%s\nAudit execution failed (exit code: %s). Treating as BLOCKED for safety.\n' "$PLUGIN_NAME" "$SKILL_NAME" "$CLAUDE_EXIT")"
+                fi
                 OVERALL_VERDICT="BLOCKED"
                 continue
               fi

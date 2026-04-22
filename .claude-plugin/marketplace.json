@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "devflow toolchain",
-    "version": "0.4.0"
+    "version": "0.4.1"
   },
   "plugins": [
     {
@@ -48,9 +48,9 @@
         "source": "url",
         "url": "https://github.com/bluejayA/devflow-k8s-deploy.git"
       },
-      "revision": "c718051e5578306b07b083aaaf895bd94efeb1f8",
-      "description": "JVM(Kotlin + Java Spring) 프로젝트를 Dockerfile + k8s manifest로 변환 (generate-only, 5-STEP 파이프라인, 비개발자 친화 한국어 UX, 613 tests, v0.1.0)",
-      "version": "0.1.0",
+      "revision": "0f765f478cf8f71d1099174d8ee2a28007072fd1",
+      "description": "JVM(Kotlin + Java Spring) 프로젝트를 Dockerfile + k8s manifest로 변환 (generate-only, 5-STEP 파이프라인, 한국어 UX, 631 tests). v0.2.0: alpine 호환 + deployment 이미지 wiring + resource_hint tiering + Dockerfile.dockerignore 동반 생성.",
+      "version": "0.2.0",
       "strict": true
     }
   ]

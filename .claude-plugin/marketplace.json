@@ -48,9 +48,9 @@
         "source": "url",
         "url": "https://github.com/bluejayA/devflow-k8s-deploy.git"
       },
-      "revision": "0f765f478cf8f71d1099174d8ee2a28007072fd1",
-      "description": "JVM(Kotlin + Java Spring) 프로젝트를 Dockerfile + k8s manifest로 변환 (generate-only, 5-STEP 파이프라인, 한국어 UX, 631 tests). v0.2.0: alpine 호환 + deployment 이미지 wiring + resource_hint tiering + Dockerfile.dockerignore 동반 생성.",
-      "version": "0.2.0",
+      "revision": "e12506da3faa28c16a9e2b2613aca9100b602e06",
+      "description": "JVM(Kotlin + Java Spring) 프로젝트를 Dockerfile + k8s manifest로 변환 (generate-only, 5-STEP 파이프라인, 한국어 UX, 688 tests). v0.4.0: StatefulSet/PVC + NetworkPolicy zero-trust + ClusterConfig preset (orbstack). STS-W01/NET-W01 validator 규칙 추가.",
+      "version": "0.4.0",
       "strict": true
     }
   ]

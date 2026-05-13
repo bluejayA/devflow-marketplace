@@ -15,9 +15,9 @@
         "source": "url",
         "url": "https://github.com/bluejayA/aidlc-devflow.git"
       },
-      "revision": "83bfa5f57401d88bdc1644048e7c87324aec5ee4",
+      "revision": "5f70d26110ad0eb13336422ef62a65c43721bbf9",
       "description": "AI-DLC 방법론 기반 개발 워크플로우 플러그인. INCEPTION/CONSTRUCTION 2-phase orchestrator + 4-stage 코드 리뷰",
-      "version": "1.13.0",
+      "version": "1.14.0",
       "strict": true
     },
     {
